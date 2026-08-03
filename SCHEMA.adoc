@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: MPL-2.0
+= oikosbot-estate schema
+
+Column definitions for the three Parquet files under each
+`snapshots/<date>/` directory, copied from the row structs in
+`oikosbot-telemetry/src/rows.rs` (the cross-task field contract for
+tasks 8-13 — field names/types/order must not be changed without
+updating every downstream consumer). Plus `analysis.json`, the pure
+analysis-core output written alongside them by `estate analyse`.
+
+== runs.parquet (`RunRow`)
+
+One GitHub Actions workflow run, flattened for storage.
+
+[cols="1,1,3"]
+|===
+| Column | Type | Meaning
+
+| repo | String | `owner/repo` full name the run belongs to.
+| run_id | i64 | GitHub Actions run ID (`workflow_runs[].id`).
+| workflow_name | String | Human-readable workflow name (`.name`).
+| workflow_path | String | Path to the workflow file, e.g. `.github/workflows/ci.yml`.
+| event | String | Triggering event (`push`, `pull_request`, `schedule`, ...).
+| conclusion | String | Run outcome as reported by the Actions API: `success`, `failure`, `startup_failure`, `cancelled`, or empty for in-progress/other.
+| started_at | String | ISO-8601 timestamp the run started.
+| updated_at | String | ISO-8601 timestamp the run was last updated.
+| duration_s | i64 | Wall-clock duration in seconds, derived from `updated_at - started_at`.
+|===
+
+== repos.parquet (`RepoRow`)
+
+One repository's metadata, flattened for storage.
+
+[cols="1,1,3"]
+|===
+| Column | Type | Meaning
+
+| repo | String | `owner/repo` full name.
+| visibility | String | `public` or `private`.
+| archived | bool | Whether the repo is archived (archived repos are skipped by `collect`, so `archived=true` rows should not appear in practice; the field is retained for completeness/future audit).
+| pushed_at | String | ISO-8601 timestamp of the last push.
+| size_kb | i64 | Repository size in KB as reported by the GitHub API — used as a code-volume input proxy in the DEA model, deliberately independent of measured compute (`wall_minutes`).
+|===
+
+== releases.parquet (`ReleaseRow`)
+
+One repository release, flattened for storage.
+
+[cols="1,1,3"]
+|===
+| Column | Type | Meaning
+
+| repo | String | `owner/repo` full name.
+| tag | String | Release tag name.
+| published_at | String | ISO-8601 timestamp the release was published.
+|===
+
+== analysis.json
+
+Written by `estate analyse` from the pure `run_analysis` core over the
+three tables above plus `Assumptions` (resource-conversion constants).
+Not Parquet — one JSON object per snapshot, re-derivable at any time
+from the Parquet tables plus assumptions, so it is not itself a primary
+data source.
+
+[cols="1,3"]
+|===
+| Field | Meaning
+
+| derived[] | Per-repo resource metrics: `repo`, `wall_minutes` (summed run duration), `energy_kwh`, `carbon_g`, `imputed_cost_usd` — the latter three are LINEAR in `wall_minutes` by construction in round one (fixed conversion factors), not independent measurements.
+| capability[] | Per-repo verified-capability rows (`CapabilityRow`): verified success-run counts and release counts, used as DEA outputs.
+| dea[] | Per-repo DEA (Data Envelopment Analysis) efficiency scores (`DeaScore`): `theta_ccr` (CCR efficiency, 1.0 = on the frontier), plus `peers` (frontier repos this DMU is benchmarked against, with peer weights). Inputs: `wall_minutes`, `size_kb`. Outputs: `verified_success_runs`, `releases`.
+| independence[] | Pearson correlation pairs over per-repo axes, evidence for/against input independence. Round one reports `wall_minutes~size_kb` (measured compute vs. code-volume proxy — the falsifier pair) and `wall_minutes~verified_success_runs`. The derived energy/carbon/cost axes are NOT reported here because they are linear transforms of `wall_minutes`, not independent measurements.
+| confidence_counts{} | Confidence label (from `derive::confidence_of`) per derived metric (`wall_minutes`, `energy_kwh`, `carbon_g`, `imputed_cost_usd`), reflecting how directly each is measured vs. imputed from constants.
+|===
+
+== SFC ledger note (flows vs. stocks)
+
+`wall_minutes`, `energy_kwh`, `carbon_g`, and `imputed_cost_usd` in
+`analysis.json` are **flows**: they are computed per snapshot period
+from that snapshot's staged runs only (a fresh `estate collect` run
+window), not cumulative totals. A stock-flow-consistent (SFC) view
+would additionally track **stocks** — cumulative totals carried across
+snapshots — and assert that stock(t) = stock(t-1) + flow(t) for each
+of these quantities, i.e. that the books reconcile snapshot over
+snapshot.
+
+Round one (this snapshot) does not implement that reconciliation: there
+is only one snapshot on disk, so there is nothing yet to reconcile
+against. The stock-flow reconciliation check itself lands with
+multi-snapshot support in round two, once a second snapshot exists to
+diff against the first. Until then, treat every number in this
+snapshot's `analysis.json` as a flow over this collection's run window,
+not as part of a verified running ledger.

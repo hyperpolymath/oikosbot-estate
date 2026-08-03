@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: MPL-2.0
+= oikosbot-estate
+Versioned telemetry snapshots of the estate, produced by `oikosbot estate`.
+Data repo only: no code, no CI. One directory per collection run under
+`snapshots/`, containing runs/repos/releases Parquet plus analysis.json.
+History is git history; dynamic-efficiency analysis reads consecutive
+snapshots. Named `oikosbot-estate` (not `oikos-*`, which is the accounting
+DSL's prefix — see oikosbot's DISAMBIGUATION.adoc).
